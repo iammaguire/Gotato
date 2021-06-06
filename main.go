@@ -23,7 +23,7 @@ func main() {
 	httpNegotiator := HTTPNTLMNegotiator{
 		Host: "localhost",
 		Port: 9000,
-		Chan: make(chan HTTPNTLMNegotiatorResult),
+		Chan: make(chan NegotiatorResult),
 	}
 
 	token, err := httpNegotiator.Serve()

