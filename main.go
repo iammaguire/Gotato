@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 
 	"golang.org/x/sys/windows"
 )
@@ -58,11 +57,11 @@ func main() {
 	fmt.Println("[+] Checking privileges")
 	canImpersonate := enablePrivilege(SE_IMPERSONATE)
 	canAssignPrimaryToken := enablePrivilege(SE_ASSIGN_PRIMARY_TOKEN)
-	canIncreaseQuoteName := enablePrivilege(SE_INCREASE_QUOTE_NAME)
+	//canIncreaseQuoteName := enablePrivilege(SE_INCREASE_QUOTE_NAME)
 
-	fmt.Println("[+] SeImpersonate " + strconv.FormatBool(canImpersonate))
-	fmt.Println("[+] SeAssignPrimaryToken " + strconv.FormatBool(canAssignPrimaryToken))
-	fmt.Println("[+] SeIncreaseQuoteName " + strconv.FormatBool(canIncreaseQuoteName))
+	// fmt.Println("[+] SeImpersonate " + strconv.FormatBool(canImpersonate))
+	// fmt.Println("[+] SeAssignPrimaryToken " + strconv.FormatBool(canAssignPrimaryToken))
+	// fmt.Println("[+] SeIncreaseQuoteName " + strconv.FormatBool(canIncreaseQuoteName))
 
 	if !canImpersonate && !canAssignPrimaryToken {
 		fmt.Println("[!] Missing necessary privileges")
