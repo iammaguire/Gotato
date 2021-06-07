@@ -79,7 +79,7 @@ func ExecuteWithToken(token windows.Token) error {
 		err := windows.CreateProcessAsUser(token, windows.StringToUTF16Ptr(program), windows.StringToUTF16Ptr(args), nil, nil, false, CREATE_NEW_CONSOLE, nil, nil, &si, &pi)
 
 		if err != nil {
-			fmt.Println("[!] CreateProcessAsUser failed")
+			fmt.Println("[!] CreateProcessAsUser failed. You may have the SeImpersonate privilege but are not running in an elevated context")
 			return err
 		}
 	}

