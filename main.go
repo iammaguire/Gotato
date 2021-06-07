@@ -20,21 +20,21 @@ func main() {
 		return
 	}
 
+	/*pipeNegotiator := NamedPipeNegotiator{}
+	result := pipeNegotiator.Serve()*/
+
 	httpNegotiator := HTTPNTLMNegotiator{
 		Host: "localhost",
 		Port: 9000,
 		Chan: make(chan NegotiatorResult),
 	}
 
-	token, err := httpNegotiator.Serve()
+	result := httpNegotiator.Serve()
 
-	/*pipeNegotiator := NamedPipeNegotiator{}
-	token, err := pipeNegotiator.Serve()*/
-
-	if err != nil {
-		fmt.Println("[!] Failed to get impersonation token")
+	if result.Error != nil {
+		fmt.Println("[!] Failed to get impersonation token: ", result.Error)
 		return
 	}
 
-	ExecuteWithToken(*token)
+	ExecuteWithToken(*result.ImpersonationToken)
 }

