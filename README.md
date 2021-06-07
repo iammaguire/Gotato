@@ -9,7 +9,7 @@ Same as the rest of the potato family this requires SeImpersonate.
 Usage: gotato -m [http|pipe] [-p PORT] [-n PIPE_NAME]
   -h    Print this help menu
   -m string
-        Mode \[http|pipe] (default "pipe")
+        Mode [http|pipe] (default "pipe")
   -n string
         Pipe name (default "mal")
   -p int
